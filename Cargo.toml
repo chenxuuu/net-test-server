@@ -8,9 +8,10 @@ description = "socket test server, control with websocket"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-warp = {version = "0.3",features = ["default"]}
+warp = {version = "0.2",features = ["default"]}
 futures-util = "0.3"
-tokio = { version = "1.12", features = ["full"] }
+tokio = { version = "0.2", features = ["full"] }
+log = "0.4"
 pretty_env_logger = "0.4"
 lazy_static = "1.4"
 serde_json = "1.0"
