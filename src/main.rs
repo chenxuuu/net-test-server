@@ -55,16 +55,16 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     port = s;
                     sender.send(Message::text(format!("port: {}", s)))
                     .await
-                    .unwrap()
+                    .unwrap_or(())
                 }
                 Socket2Ws::Connected(s) => sender
                     .send(Message::text(format!("connect: {}", s)))
                     .await
-                    .unwrap(),
+                    .unwrap_or(()),
                 Socket2Ws::Disconnected(s) => sender
                     .send(Message::text(format!("disconnect: {}", s)))
                     .await
-                    .unwrap(),
+                    .unwrap_or(()),
                 Socket2Ws::SocketMessage(s) => {
                     //todo!()
                 }
@@ -116,7 +116,10 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     }
                 };
                 loop {
-                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let (mut socket, _) = match listener.accept().await {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
                     let mut wtc = wts.clone();
                     let mut krs = kill_all_rx.clone();
                     tokio::spawn(async move {
@@ -181,6 +184,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
         };
         if message.is_text() {
             wt.send(Socket2Ws::WsMessage(
+                //此处绝对不会panic，因为前面检查过了
                 String::from_utf8(message.into_bytes()).unwrap(),
             ))
             .await
