@@ -4,7 +4,7 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
-use std::{sync::{mpsc::Receiver, Arc}, net::Ipv4Addr};
+use std::{sync::{mpsc::Receiver, Arc}, net::Ipv4Addr, collections::HashMap};
 
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::{
@@ -23,7 +23,7 @@ use serde_json::{Result, json};
 #[derive(Debug)]
 enum Socket2Ws {
     Created(u16),           //tcp通道开启，带端口
-    Connected(String),      //tcp客户端连上
+    Connected(String,String),      //tcp客户端连上
     Disconnected(String),   //tcp客户端断开
     SocketMessage(Vec<u8>), //收到tcp消息
     WsMessage(String),      //收到ws消息
@@ -38,6 +38,7 @@ enum Ws2Socket {
     Quit,               //完全退出
 }
 
+//返回给客户端的 统一错误信息
 #[derive(Serialize)]
 struct WsError{
     action : String,
@@ -52,6 +53,7 @@ impl WsError {
     }
 }
 
+//返回给客户端的 响应新端口的申请
 #[derive(Serialize)]
 struct WsNewPort{
     action : String,
@@ -66,12 +68,47 @@ impl WsNewPort {
     }
 }
 
+//返回给客户端的 新客户端已建立连接
+#[derive(Serialize)]
+struct WsNewClient{
+    action : String,
+    client : String,
+    addr : String,
+}
+impl WsNewClient {
+    fn new(client: String, addr: String) -> WsNewClient {
+        WsNewClient {
+            action: String::from("connected"),
+            client,
+            addr
+        }
+    }
+}
+
+//返回给客户端的 新客户端已建立连接
+#[derive(Serialize)]
+struct WsDisconnectClient{
+    action : String,
+    client : String,
+}
+impl WsDisconnectClient {
+    fn new(client: String) -> WsDisconnectClient {
+        WsDisconnectClient {
+            action: String::from("closed"),
+            client
+        }
+    }
+}
 
 lazy_static! {
     //存放已打开的端口
     static ref TCP_PORTS: Mutex<[bool;65535]> = {
         Mutex::new([false;65535])
     };
+}
+
+fn create_client_name() -> String {
+    random_string::generate(6, "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }
 
 async fn handle_ws_client(websocket: warp::ws::WebSocket) {
@@ -81,6 +118,10 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     let (wt, mut wr) = tokio::sync::mpsc::channel(32);
     //开启tcp服务端用
     let (mut open_send, mut open_recv) = tokio::sync::mpsc::channel(1);
+    //存储每个客户端的匹配
+    let clients : Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
+    //给ws线程里面用的
+    let clients_ws = clients.clone();
     tokio::spawn(async move {
         let mut port = 0;
         while let Some(message) = wr.recv().await {
@@ -90,14 +131,15 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     port = s;
                     sender.send(Message::text(json!(WsNewPort::new(s)).to_string())).await.unwrap_or(())
                 }
-                Socket2Ws::Connected(s) => sender
-                    .send(Message::text(format!("connect: {}", s)))
-                    .await
-                    .unwrap_or(()),
-                Socket2Ws::Disconnected(s) => sender
-                    .send(Message::text(format!("disconnect: {}", s)))
-                    .await
-                    .unwrap_or(()),
+                Socket2Ws::Connected(s,addr) => 
+                    sender.send(Message::text(json!(WsNewClient::new(s,addr)).to_string())).await.unwrap_or(()),
+                Socket2Ws::Disconnected(s) => {
+                    {
+                        let mut clients = clients_ws.lock().await;
+                        match clients.remove(&s) {_=>()};
+                    }
+                    sender.send(Message::text(json!(WsDisconnectClient::new(s)).to_string())).await.unwrap_or(());
+                }
                 Socket2Ws::SocketMessage(s) => {
                     //todo!()
                 }
@@ -114,6 +156,15 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                     let t = t.as_str().unwrap_or("");
                                     if t == "tcp" {
                                         open_send.send(()).await.unwrap_or(());
+                                    }
+                                }
+                            },
+                            "closec" => {//关掉指定客户端
+                                if let Some(t) = r.get("client") {
+                                    let t = t.as_str().unwrap_or("");
+                                    let mut clients = clients_ws.lock().await;
+                                    if let Some(c) = &clients.get_mut(t){
+                                        c.broadcast(true).unwrap_or(())
                                     }
                                 }
                             },
@@ -142,6 +193,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     let mut wts = wt.clone();
     //给tcp服务端主线程用
     let mut krm = kill_all_rx.clone();
+    //给主线程用
+    let clients_s = clients.clone();
     tokio::spawn(async move {
         select! {//用select可以强退
             _ = async {
@@ -175,13 +228,32 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
-                    let mut wtc = wts.clone();
                     let mut krs = kill_all_rx.clone();
+                    let (kill_c_tx, mut kill_c_rx) = tokio::sync::watch::channel(false);
+                    let clients = clients_s.clone();
+                    let client = {
+                        let mut clients = clients.lock().await;
+                        let mut name;
+                        loop {
+                            name = create_client_name();
+                            if clients.contains_key(&name) {
+                                continue
+                            }
+                            clients.insert(name.clone(),kill_c_tx);
+                            break
+                        }
+                        name
+                    };
+                    let mut wtc = wts.clone();      //给每个能关闭的都加上
+                    let mut wta = wts.clone();      //给每个能关闭的都加上
+                    let client_a = client.clone();  //给每个能关闭的都加上
+                    let mut wtk = wts.clone();      //给每个能关闭的都加上
+                    let client_k = client.clone();  //给每个能关闭的都加上
                     tokio::spawn(async move {
                         select! {
                             _ = async {
                                 info!("new client connected");
-                                wtc.send(Socket2Ws::Connected(String::from("test client")))
+                                wtc.send(Socket2Ws::Connected(client.clone(),socket.peer_addr().unwrap().to_string()))
                                     .await
                                     .unwrap_or(());
                                 let mut buf = vec![0; 1024];
@@ -200,15 +272,23 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                         Err(_) => break,
                                     }
                                 }
-                                info!("new client disconnected");
-                                wtc.send(Socket2Ws::Disconnected(String::from("test client")))
-                                    .await
-                                    .unwrap_or(());
+                                info!("client disconnected by remote");
+                                wtc.send(Socket2Ws::Disconnected(client)).await.unwrap_or(());
                             } => {}
                             _ = async {
                                 while let Some(value) = krs.recv().await {
-                                    println!("received = {:?}", value);
                                     if value {
+                                        info!("client disconnected by all");
+                                        wta.send(Socket2Ws::Disconnected(client_a)).await.unwrap_or(());
+                                        return
+                                    }
+                                }
+                            } => {}
+                            _ = async {
+                                while let Some(value) = kill_c_rx.recv().await {
+                                    if value {
+                                        info!("client disconnected by all");
+                                        wtk.send(Socket2Ws::Disconnected(client_k)).await.unwrap_or(());
                                         return
                                     }
                                 }
