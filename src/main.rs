@@ -17,6 +17,9 @@ use tokio::{
 use warp::{ws::Message, Filter};
 use lazy_static::*;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Result, json};
+
 #[derive(Debug)]
 enum Socket2Ws {
     Created(u16),           //tcp通道开启，带端口
@@ -24,6 +27,7 @@ enum Socket2Ws {
     Disconnected(String),   //tcp客户端断开
     SocketMessage(Vec<u8>), //收到tcp消息
     WsMessage(String),      //收到ws消息
+    Error(String),      //错误信息
     Quit,   //wx断开连接
 }
 
@@ -33,6 +37,21 @@ enum Ws2Socket {
     Kick(String),       //某客户端要被踢了
     Quit,               //完全退出
 }
+
+#[derive(Serialize)]
+struct WsError{
+    action : String,
+    msg : String
+}
+impl WsError {
+    fn new(error: &str) -> WsError {
+        WsError {
+            action: String::from("error"),
+            msg: String::from(error)
+        }
+    }
+}
+
 
 lazy_static! {
     //存放已打开的端口
@@ -46,6 +65,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     let (mut sender, mut receiver) = websocket.split();
     //给websocket通信用
     let (wt, mut wr) = tokio::sync::mpsc::channel(32);
+    //开启tcp服务端用
+    let (mut open_send, mut open_recv) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         let mut port = 0;
         while let Some(message) = wr.recv().await {
@@ -69,7 +90,28 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     //todo!()
                 }
                 Socket2Ws::WsMessage(s) => {
-                    //todo!()
+                    let r : serde_json::Value = match serde_json::from_str(&s) {
+                        Ok(r) => r,
+                        Err(_) => continue
+                    };
+                    if let Some(action) = r.get("action") {//没action就当心跳
+                        let action = action.as_str().unwrap_or("");
+                        match action {
+                            "newp" => {//开新端口
+                                if let Some(t) = r.get("type") {
+                                    let t = t.as_str().unwrap_or("");
+                                    if t == "tcp" {
+                                        open_send.send(()).await.unwrap_or(());
+                                    }
+                                }
+                            },
+                            _ => (),
+                        }
+                    }
+                }
+                Socket2Ws::Error(s) => {
+                    warn!("received error: {}",s);
+                    sender.send(Message::text(json!(WsError::new(&s)).to_string())).await.unwrap_or(())
                 }
                 Socket2Ws::Quit => {
                     if port != 0 {
@@ -91,10 +133,11 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     tokio::spawn(async move {
         select! {//用select可以强退
             _ = async {
+                open_recv.recv().await.unwrap();
                 let mut port : u16 = 0;
                 {
                     let mut ports = TCP_PORTS.lock().await;
-                    for i in 10000..65535 {
+                    for i in 20000..65535 {
                         if !ports[i] {
                             ports[i] = true;
                             port = i as u16;
@@ -103,7 +146,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     }
                 }
                 if port == 0{
-                    //fail todo
+                    wts.send(Socket2Ws::Error(String::from("no more free port"))).await.unwrap_or(());
                 }
                 let mut listener = match TcpListener::bind((Ipv4Addr::new(127, 0, 0, 1), port)).await {
                     Ok(l) => {
@@ -111,7 +154,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         l
                     },
                     Err(_) => {
-                        //fail todo
+                        wts.send(Socket2Ws::Error(String::from("open port failed"))).await.unwrap_or(());
                         return
                     }
                 };
