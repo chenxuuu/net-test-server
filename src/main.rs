@@ -52,6 +52,20 @@ impl WsError {
     }
 }
 
+#[derive(Serialize)]
+struct WsNewPort{
+    action : String,
+    port : u16
+}
+impl WsNewPort {
+    fn new(port: u16) -> WsNewPort {
+        WsNewPort {
+            action: String::from("port"),
+            port
+        }
+    }
+}
+
 
 lazy_static! {
     //存放已打开的端口
@@ -74,9 +88,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
             match message {
                 Socket2Ws::Created(s) => {
                     port = s;
-                    sender.send(Message::text(format!("port: {}", s)))
-                    .await
-                    .unwrap_or(())
+                    sender.send(Message::text(json!(WsNewPort::new(s)).to_string())).await.unwrap_or(())
                 }
                 Socket2Ws::Connected(s) => sender
                     .send(Message::text(format!("connect: {}", s)))
