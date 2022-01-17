@@ -18,24 +18,17 @@ use warp::{ws::Message, Filter};
 use lazy_static::*;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Result, json};
+use serde_json::json;
 
 #[derive(Debug)]
 enum Socket2Ws {
     Created(u16),           //tcp通道开启，带端口
     Connected(String,String),      //tcp客户端连上
     Disconnected(String),   //tcp客户端断开
-    SocketMessage(Vec<u8>), //收到tcp消息
+    SocketMessage(String,Vec<u8>), //收到tcp消息
     WsMessage(String),      //收到ws消息
     Error(String),      //错误信息
     Quit,   //wx断开连接
-}
-
-#[derive(Debug)]
-enum Ws2Socket {
-    WsMessage(String),  //收到ws消息
-    Kick(String),       //某客户端要被踢了
-    Quit,               //完全退出
 }
 
 //返回给客户端的 统一错误信息
@@ -100,6 +93,34 @@ impl WsDisconnectClient {
     }
 }
 
+//返回给客户端的 收到客户端的数据(data)
+#[derive(Serialize)]
+struct WsRecvData{
+    action : String,
+    client : String,
+    data: String,
+    hex: bool
+}
+impl WsRecvData {
+    fn new(client: String, data: String) -> WsRecvData {
+        WsRecvData {
+            action: String::from("data"),
+            client,
+            data,
+            hex: true
+        }
+    }
+}
+
+//ws向tcp发消息的数据结构 发送数据到指定客户端(sendc)
+#[derive(Deserialize)]
+struct Wssendc {
+    action: String,
+    data: String,
+    hex: bool,
+    client: String,
+}
+
 lazy_static! {
     //存放已打开的端口
     static ref TCP_PORTS: Mutex<[bool;65535]> = {
@@ -111,17 +132,37 @@ fn create_client_name() -> String {
     random_string::generate(6, "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }
 
+use std::{fmt::Write, num::ParseIntError};
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect()
+}
+pub fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        write!(&mut s, "{:02x}", b).unwrap();
+    }
+    s
+}
+
 async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     info!("new client");
     let (mut sender, mut receiver) = websocket.split();
     //给websocket通信用
     let (wt, mut wr) = tokio::sync::mpsc::channel(32);
+    //给ws线程用
+    let mut wt_ws = wt.clone();
     //开启tcp服务端用
     let (mut open_send, mut open_recv) = tokio::sync::mpsc::channel(1);
-    //存储每个客户端的匹配
+    //存储每个客户端的名字和关闭消息通道
     let clients : Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
+    //存储每个客户端的名字和关闭消息通道
+    let clients_data : Arc<Mutex<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
     //给ws线程里面用的
     let clients_ws = clients.clone();
+    let clients_data_ws = clients_data.clone();
     tokio::spawn(async move {
         let mut port = 0;
         while let Some(message) = wr.recv().await {
@@ -137,11 +178,14 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     {
                         let mut clients = clients_ws.lock().await;
                         match clients.remove(&s) {_=>()};
+                        let mut clients = clients_data_ws.lock().await;
+                        match clients.remove(&s) {_=>()};
                     }
                     sender.send(Message::text(json!(WsDisconnectClient::new(s)).to_string())).await.unwrap_or(());
                 }
-                Socket2Ws::SocketMessage(s) => {
-                    //todo!()
+                Socket2Ws::SocketMessage(c,d) => {
+                    let data = encode_hex(&d);
+                    sender.send(Message::text(json!(WsRecvData::new(c,data)).to_string())).await.unwrap_or(());
                 }
                 Socket2Ws::WsMessage(s) => {
                     let r : serde_json::Value = match serde_json::from_str(&s) {
@@ -166,6 +210,28 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                     if let Some(c) = &clients.get_mut(t){
                                         c.broadcast(true).unwrap_or(())
                                     }
+                                }
+                            },
+                            "sendc" => {//发送数据到指定客户端
+                                let r : Wssendc = match serde_json::from_str(&s) {
+                                    Ok(r) => r,
+                                    _ => continue
+                                };
+                                let data = if r.hex {
+                                    match decode_hex(&r.data) {
+                                        Ok(r) => r,
+                                        _ => {
+                                            wt_ws.send(Socket2Ws::Error(String::from("hex decode error!")))
+                                            .await.unwrap_or(());
+                                            continue
+                                        }
+                                    }
+                                }else{
+                                    r.data.to_owned().into_bytes()
+                                };
+                                let mut clients = clients_data_ws.lock().await;
+                                if let Some(c) = &mut clients.get_mut(&r.client){
+                                    c.send(data).await.unwrap_or(())
                                 }
                             },
                             _ => (),
@@ -195,6 +261,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     let mut krm = kill_all_rx.clone();
     //给主线程用
     let clients_s = clients.clone();
+    let clients_data_s = clients_data.clone();
     tokio::spawn(async move {
         select! {//用select可以强退
             _ = async {
@@ -228,6 +295,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
+                    let addr = socket.peer_addr().unwrap().to_string();//客户端地址
+                    let (mut socket_read,mut socket_write) = socket.into_split();
                     let mut krs = kill_all_rx.clone();
                     let (kill_c_tx, mut kill_c_rx) = tokio::sync::watch::channel(false);
                     let clients = clients_s.clone();
@@ -244,7 +313,17 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         }
                         name
                     };
+
+                    //收ws-->tcp消息用的
+                    let (st, mut sr) = tokio::sync::mpsc::channel(32);
+                    {
+                        let mut clients_data = clients_data_s.lock().await;
+                        clients_data.insert(client.clone(),st);
+                    }
+
                     let mut wtc = wts.clone();      //给每个能关闭的都加上
+                    let mut wt_send = wts.clone();      //给每个能关闭的都加上
+                    let client_send = client.clone();  //给每个能关闭的都加上
                     let mut wta = wts.clone();      //给每个能关闭的都加上
                     let client_a = client.clone();  //给每个能关闭的都加上
                     let mut wtk = wts.clone();      //给每个能关闭的都加上
@@ -253,27 +332,42 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         select! {
                             _ = async {
                                 info!("new client connected");
-                                wtc.send(Socket2Ws::Connected(client.clone(),socket.peer_addr().unwrap().to_string()))
+                                wtc.send(Socket2Ws::Connected(client.clone(),addr))
                                     .await
                                     .unwrap_or(());
-                                let mut buf = vec![0; 1024];
+                                let mut buf = vec![0; 2048];
                                 loop {
-                                    match socket.read(&mut buf).await {
-                                        Ok(0) => break,
+                                    match socket_read.read(&mut buf).await {
+                                        Ok(0) => {
+                                            info!("receive 0 length");
+                                            break
+                                        },
                                         Ok(n) => {
                                             info!("recv tcp msg");
-                                            wtc.send(Socket2Ws::SocketMessage((&buf[..n]).to_vec()))
+                                            wtc.send(Socket2Ws::SocketMessage(client.clone(),(&buf[..n]).to_vec()))
                                                 .await
                                                 .unwrap_or(());
                                             // if socket.write_all(&buf[..n]).await.is_err() {
                                             //     break
                                             // }
                                         }
-                                        Err(_) => break,
+                                        Err(e) => {
+                                            error!("read error! {:?}",e);
+                                            break
+                                        }
                                     }
                                 }
                                 info!("client disconnected by remote");
                                 wtc.send(Socket2Ws::Disconnected(client)).await.unwrap_or(());
+                            } => {}
+                            _ = async {
+                                while let Some(msg) = sr.recv().await {
+                                    if socket_write.write_all(&msg).await.is_err() {
+                                        break
+                                    }
+                                }
+                                info!("client disconnected by remote");
+                                wt_send.send(Socket2Ws::Disconnected(client_send)).await.unwrap_or(());
                             } => {}
                             _ = async {
                                 while let Some(value) = krs.recv().await {
@@ -287,7 +381,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                             _ = async {
                                 while let Some(value) = kill_c_rx.recv().await {
                                     if value {
-                                        info!("client disconnected by all");
+                                        info!("client disconnected by user");
                                         wtk.send(Socket2Ws::Disconnected(client_k)).await.unwrap_or(());
                                         return
                                     }
