@@ -290,7 +290,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                 if port == 0{
                     wts.send(Socket2Ws::Error(String::from("no more free port"))).await.unwrap_or(());
                 }
-                let mut listener = match TcpListener::bind((Ipv4Addr::new(127, 0, 0, 1), port)).await {
+                let mut listener = match TcpListener::bind((Ipv4Addr::new(0, 0, 0, 0), port)).await {
                     Ok(l) => {
                         wts.send(Socket2Ws::Created(port)).await.unwrap_or(());
                         l
