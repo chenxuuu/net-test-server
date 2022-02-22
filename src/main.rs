@@ -278,12 +278,25 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                 open_recv.recv().await.unwrap();
                 let mut port : u16 = 0;
                 {
+                    //随机串口
+                    let start = 50000 + fastrand::usize(0..10000);
                     let mut ports = TCP_PORTS.lock().await;
-                    for i in 50000..59999 {
+                    //往下找一个可用的
+                    for i in start..60000 {
                         if !ports[i] {
                             ports[i] = true;
                             port = i as u16;
                             break
+                        }
+                    }
+                    //还没找到就转圈找
+                    if port == 0 {
+                        for i in 50000..start {
+                            if !ports[i] {
+                                ports[i] = true;
+                                port = i as u16;
+                                break
+                            }
                         }
                     }
                 }
