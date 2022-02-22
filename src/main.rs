@@ -20,6 +20,16 @@ use lazy_static::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+//获取资源文件路径
+pub fn get_path() -> String{
+    let path = std::env::args().nth(1).unwrap_or(String::from("web/"));
+    if path.ends_with('/') || path.ends_with('\\') {
+        path
+    } else {
+        path + "/"
+    }
+}
+
 #[derive(Debug)]
 enum Socket2Ws {
     Created(u16),           //tcp通道开启，带端口
@@ -269,7 +279,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                 let mut port : u16 = 0;
                 {
                     let mut ports = TCP_PORTS.lock().await;
-                    for i in 20000..65535 {
+                    for i in 50000..59999 {
                         if !ports[i] {
                             ports[i] = true;
                             port = i as u16;
@@ -437,6 +447,8 @@ async fn main() {
             // And then our closure will be called when it completes...
             ws.on_upgrade(handle_ws_client)
         });
-    info!("ws://127.0.0.1:2333/ws/netlab");
-    warp::serve(routes).run(([127, 0, 0, 1], 2333)).await;
+    let web = warp::fs::dir(get_path());
+    info!("ws://192.168.31.116:10241/ws/netlab");
+    info!("{}",get_path());
+    warp::serve(routes.or(web)).run(([0,0,0,0], 10240)).await;
 }
