@@ -4,15 +4,14 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
-use std::{sync::{mpsc::Receiver, Arc}, net::Ipv4Addr, collections::HashMap};
+use std::{sync::Arc, collections::HashMap};
 
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     select,
     sync::Mutex,
-    time,
 };
 use warp::{ws::Message, Filter};
 use lazy_static::*;
@@ -125,7 +124,6 @@ impl WsRecvData {
 //ws向tcp发消息的数据结构 发送数据到指定客户端(sendc)
 #[derive(Deserialize)]
 struct Wssendc {
-    action: String,
     data: String,
     hex: bool,
     client: String,
@@ -218,7 +216,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                     let t = t.as_str().unwrap_or("");
                                     let mut clients = clients_ws.lock().await;
                                     if let Some(c) = &clients.get_mut(t){
-                                        c.broadcast(true).unwrap_or(())
+                                        c.send(true).unwrap_or(())
                                     }
                                 }
                             },
@@ -302,19 +300,20 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                 }
                 if port == 0{
                     wts.send(Socket2Ws::Error(String::from("no more free port"))).await.unwrap_or(());
+                    return
                 }
-                let mut listener = match TcpListener::bind((Ipv4Addr::new(0, 0, 0, 0), port)).await {
+                let mut listener = match TcpListener::bind(format!("0.0.0.0:{}",port)).await {
                     Ok(l) => {
                         wts.send(Socket2Ws::Created(port)).await.unwrap_or(());
                         l
                     },
-                    Err(_) => {
-                        wts.send(Socket2Ws::Error(String::from("open port failed"))).await.unwrap_or(());
+                    Err(e) => {
+                        wts.send(Socket2Ws::Error(format!("open port {} failed:{:?}",port,e))).await.unwrap_or(());
                         return
                     }
                 };
                 loop {
-                    let (mut socket, _) = match listener.accept().await {
+                    let (socket, _) = match listener.accept().await {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
@@ -393,8 +392,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                 wt_send.send(Socket2Ws::Disconnected(client_send)).await.unwrap_or(());
                             } => {}
                             _ = async {
-                                while let Some(value) = krs.recv().await {
-                                    if value {
+                                loop {
+                                    if krs.changed().await.is_ok() {
                                         info!("client disconnected by all");
                                         wta.send(Socket2Ws::Disconnected(client_a)).await.unwrap_or(());
                                         return
@@ -402,8 +401,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                 }
                             } => {}
                             _ = async {
-                                while let Some(value) = kill_c_rx.recv().await {
-                                    if value {
+                                loop {
+                                    if kill_c_rx.changed().await.is_ok() {
                                         info!("client disconnected by user");
                                         wtk.send(Socket2Ws::Disconnected(client_k)).await.unwrap_or(());
                                         return
@@ -415,9 +414,8 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                 }
             } => {}
             _ = async {//强退任务用，别的同理
-                while let Some(value) = krm.recv().await {
-                    println!("received = {:?}", value);
-                    if value {
+                loop {
+                    if krm.changed().await.is_ok() {
                         return
                     }
                 }
@@ -443,7 +441,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
             .unwrap_or(());
         }
     }
-    kill_all_tx.broadcast(true).unwrap_or(());
+    kill_all_tx.send(true).unwrap_or(());
     wt.send(Socket2Ws::Quit).await.unwrap_or(());
 
     info!("client disconnected");
