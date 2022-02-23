@@ -161,9 +161,9 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     //给websocket通信用
     let (wt, mut wr) = tokio::sync::mpsc::channel(32);
     //给ws线程用
-    let mut wt_ws = wt.clone();
+    let wt_ws = wt.clone();
     //开启tcp服务端用
-    let (mut open_send, mut open_recv) = tokio::sync::mpsc::channel(1);
+    let (open_send, mut open_recv) = tokio::sync::mpsc::channel(1);
     //存储每个客户端的名字和关闭消息通道
     let clients : Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
     //存储每个客户端的名字和关闭消息通道
@@ -264,7 +264,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     //完全退出tcp服务端
     let (kill_all_tx, kill_all_rx) = tokio::sync::watch::channel(false);
     //tcp给ws发消息用
-    let mut wts = wt.clone();
+    let wts = wt.clone();
     //给tcp服务端主线程用
     let mut krm = kill_all_rx.clone();
     //给主线程用
@@ -302,7 +302,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     wts.send(Socket2Ws::Error(String::from("no more free port"))).await.unwrap_or(());
                     return
                 }
-                let mut listener = match TcpListener::bind(format!("0.0.0.0:{}",port)).await {
+                let listener = match TcpListener::bind(format!("0.0.0.0:{}",port)).await {
                     Ok(l) => {
                         wts.send(Socket2Ws::Created(port)).await.unwrap_or(());
                         l
@@ -343,12 +343,12 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                         clients_data.insert(client.clone(),st);
                     }
 
-                    let mut wtc = wts.clone();      //给每个能关闭的都加上
-                    let mut wt_send = wts.clone();      //给每个能关闭的都加上
+                    let wtc = wts.clone();      //给每个能关闭的都加上
+                    let wt_send = wts.clone();      //给每个能关闭的都加上
                     let client_send = client.clone();  //给每个能关闭的都加上
-                    let mut wta = wts.clone();      //给每个能关闭的都加上
+                    let wta = wts.clone();      //给每个能关闭的都加上
                     let client_a = client.clone();  //给每个能关闭的都加上
-                    let mut wtk = wts.clone();      //给每个能关闭的都加上
+                    let wtk = wts.clone();      //给每个能关闭的都加上
                     let client_k = client.clone();  //给每个能关闭的都加上
                     tokio::spawn(async move {
                         select! {
@@ -423,7 +423,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
         }
     });
 
-    let mut wt = wt.clone();
+    let wt = wt.clone();
     while let Some(body) = receiver.next().await {
         let message = match body {
             Ok(msg) => msg,
