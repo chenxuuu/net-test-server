@@ -208,7 +208,6 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                                     let t = t.as_str().unwrap_or("");
                                     match t {
                                         "tcp" => open_send.send(4).await.unwrap_or(()),
-                                        "udp" => open_send.send(6).await.unwrap_or(()),
                                         _ => (),
                                     }
                                 }
@@ -275,7 +274,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
     tokio::spawn(async move {
         select! {//用select可以强退
             _ = async {
-                let ip_type = open_recv.recv().await.unwrap();
+                open_recv.recv().await.unwrap();
                 let mut port : u16 = 0;
                 {
                     //随机串口
@@ -304,11 +303,7 @@ async fn handle_ws_client(websocket: warp::ws::WebSocket) {
                     wts.send(Socket2Ws::Error(String::from("no more free port"))).await.unwrap_or(());
                     return
                 }
-                let addr = match ip_type {
-                    4 => IpAddr::from_str("0.0.0.0").unwrap(),
-                    6 => IpAddr::from_str("::").unwrap(),
-                    _ => return,//不可能的
-                };
+                let addr = IpAddr::from_str("::").unwrap();//监听ipv6就相当于同时监听了v6和v4
                 let listener = match TcpListener::bind((addr,port)).await {
                     Ok(l) => {
                         wts.send(Socket2Ws::Created(port)).await.unwrap_or(());
