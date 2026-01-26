@@ -463,5 +463,5 @@ async fn main() {
     let web = warp::fs::dir(get_path());
     info!("ws://192.168.31.116:10241/ws/netlab");
     info!("{}",get_path());
-    warp::serve(routes.or(web)).run(([0,0,0,0], 10240)).await;
+    warp::serve(routes.or(web)).run((IpAddr::from_str("::").unwrap(), 10240)).await;
 }
