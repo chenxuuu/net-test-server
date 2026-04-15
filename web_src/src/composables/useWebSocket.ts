@@ -19,6 +19,7 @@ export function useWebSocket() {
   let reconnectAttempts = 0;
   const maxReconnectAttempts = 5;
   const reconnectDelay = 2000;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -30,10 +31,19 @@ export function useWebSocket() {
       reconnectAttempts = 0;
       connected.value = true;
       addSystemMessage('已连接到服务器');
+      heartbeatTimer = setInterval(() => {
+        if (ws.value && ws.value.readyState === WebSocket.OPEN) {
+          ws.value.send('{}');
+        }
+      }, 30000);
     };
     
     ws.value.onclose = () => {
       connected.value = false;
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
       handleDisconnect();
     };
     
